@@ -1,7 +1,9 @@
-import { useState, useRef } from 'react';
+import { useState, useRef, useCallback } from 'react';
 import { Camera } from 'react-camera-pro';
 import { useSupabaseClient } from '@supabase/auth-helpers-react';
 import { SpeechRecognition } from '../utils/speechRecognition';
+import { useMutation } from '@tanstack/react-query';
+import { debounce } from 'lodash';
 
 export default function CarInputForm() {
   const [step, setStep] = useState(1);
@@ -9,30 +11,70 @@ export default function CarInputForm() {
   const cameraRef = useRef(null);
   const supabase = useSupabaseClient();
   
-  // OCR för registreringsskylt
+  // Använd React Query för API-anrop
+  const scanMutation = useMutation({
+    mutationFn: async (image) => {
+      const response = await fetch('/api/ocr', {
+        method: 'POST',
+        body: JSON.stringify({ image }),
+      });
+      
+      if (!response.ok) {
+        throw new Error('OCR-tjänsten svarade inte');
+      }
+      
+      return response.json();
+    },
+    onSuccess: async (data) => {
+      const { registrationNumber } = data;
+      
+      try {
+        const carDetails = await fetch(`/api/vehicle-data?reg=${registrationNumber}`);
+        const vehicleData = await carDetails.json();
+        setCarData(vehicleData);
+        setStep(2);
+      } catch (error) {
+        console.error('Fel vid hämtning av fordonsdata:', error);
+        // Visa felmeddelande till användaren
+      }
+    },
+    onError: (error) => {
+      console.error('OCR-fel:', error);
+      // Visa felmeddelande till användaren
+    }
+  });
+  
+  // OCR för registreringsskylt med förbättrad felhantering
   const scanLicensePlate = async () => {
-    const image = cameraRef.current.takePhoto();
-    // Anropa OCR-API för att extrahera registreringsnummer
-    const response = await fetch('/api/ocr', {
-      method: 'POST',
-      body: JSON.stringify({ image }),
-    });
-    
-    const { registrationNumber } = await response.json();
-    
-    // Hämta bildata från bilregister-API
-    const carDetails = await fetch(`/api/vehicle-data?reg=${registrationNumber}`);
-    setCarData(await carDetails.json());
-    setStep(2);
+    try {
+      const image = cameraRef.current.takePhoto();
+      scanMutation.mutate(image);
+    } catch (error) {
+      console.error('Kunde inte ta foto:', error);
+      // Visa felmeddelande till användaren
+    }
   };
+  
+  // Debounce röstinmatning för bättre prestanda
+  const debouncedVoiceProcessing = useCallback(
+    debounce((text) => {
+      try {
+        const parsedData = parseVoiceInput(text);
+        setCarData(prevData => ({...prevData, ...parsedData}));
+      } catch (error) {
+        console.error('Fel vid parsning av röstinmatning:', error);
+      }
+    }, 300),
+    []
+  );
   
   // Röststyrning för inmatning
   const startVoiceInput = () => {
     SpeechRecognition.start({
-      onResult: (text) => {
-        // Parsning av röstinmatning till strukturerad data
-        const parsedData = parseVoiceInput(text);
-        setCarData({...carData, ...parsedData});
+      onResult: debouncedVoiceProcessing,
+      onError: (error) => {
+        console.error('Röstinmatningsfel:', error);
+        // Visa felmeddelande till användaren
       }
     });
   };
